@@ -454,6 +454,14 @@ export function Prompt(props: PromptProps) {
         command: inputText,
       })
       setStore("mode", "normal")
+    } else if (inputText.startsWith("/api-key")) {
+      command.trigger("api_key.manage")
+      input.clear()
+      setStore("prompt", {
+        input: "",
+        parts: [],
+      })
+      return
     } else if (
       inputText.startsWith("/") &&
       iife(() => {
