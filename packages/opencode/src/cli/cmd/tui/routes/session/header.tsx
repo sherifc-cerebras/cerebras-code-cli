@@ -105,7 +105,6 @@ export function Header() {
   const sync = useSync()
   const session = createMemo(() => sync.session.get(route.sessionID)!)
   const messages = createMemo(() => sync.data.message[route.sessionID] ?? [])
-  const shareEnabled = createMemo(() => sync.data.config.share !== "disabled")
 
   const context = createMemo(() => {
     const last = messages().findLast((x) => x.role === "assistant" && x.tokens.output > 0) as AssistantMessage
@@ -155,24 +154,6 @@ export function Header() {
               <Title session={session} />
               <ContextInfo context={context} messages={messages} />
             </box>
-            <Show when={shareEnabled()}>
-              <box flexDirection="row" justifyContent="space-between" gap={1}>
-                <box flexGrow={1} flexShrink={1}>
-                  <Switch>
-                    <Match when={session().share?.url}>
-                      <text fg={theme.textMuted} wrapMode="word">
-                        {session().share!.url}
-                      </text>
-                    </Match>
-                    <Match when={true}>
-                      <text fg={theme.text} wrapMode="word">
-                        /share <span style={{ fg: theme.textMuted }}>copy link</span>
-                      </text>
-                    </Match>
-                  </Switch>
-                </box>
-              </box>
-            </Show>
           </Match>
         </Switch>
       </box>

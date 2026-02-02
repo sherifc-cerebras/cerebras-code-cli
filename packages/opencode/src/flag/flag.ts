@@ -1,5 +1,4 @@
 export namespace Flag {
-  export const OPENCODE_AUTO_SHARE = truthyWithFallback("CEREBRAS_CODE_AUTO_SHARE", "OPENCODE_AUTO_SHARE")
   export const OPENCODE_CONFIG = process.env["CEREBRAS_CODE_CONFIG"] || process.env["OPENCODE_CONFIG"]
   export const OPENCODE_CONFIG_DIR = process.env["CEREBRAS_CODE_CONFIG_DIR"] || process.env["OPENCODE_CONFIG_DIR"]
   export const OPENCODE_CONFIG_CONTENT =

@@ -398,7 +398,6 @@ export const GithubRunCommand = cmd({
           ? (payload as PullRequestReviewCommentEvent).pull_request.number
           : (payload as IssueCommentEvent).issue.number
       const runUrl = `/${owner}/${repo}/actions/runs/${runId}`
-      const shareBaseUrl = isMock ? "https://dev.opencode.ai" : "https://opencode.ai"
 
       let appToken: string
       let octoRest: Octokit
@@ -406,7 +405,6 @@ export const GithubRunCommand = cmd({
       let commentId: number
       let gitConfig: string
       let session: { id: string; title: string; version: string }
-      let shareId: string | undefined
       let exitCode = 0
       type PromptFiles = Awaited<ReturnType<typeof getUserPrompt>>["promptFiles"]
 
@@ -429,12 +427,6 @@ export const GithubRunCommand = cmd({
         const repoData = await fetchRepo()
         session = await Session.create({})
         subscribeSessionEvents()
-        shareId = await (async () => {
-          if (share === false) return
-          if (!share && repoData.data.private) return
-          await Session.share(session.id)
-          return session.id.slice(-8)
-        })()
         console.log("opencode session", session.id)
 
         // Handle 3 cases
@@ -454,8 +446,7 @@ export const GithubRunCommand = cmd({
               const summary = await summarize(response)
               await pushToLocalBranch(summary, uncommittedChanges)
             }
-            const hasShared = prData.comments.nodes.some((c) => c.body.includes(`${shareBaseUrl}/s/${shareId}`))
-            await updateComment(`${response}${footer({ image: !hasShared })}`)
+            await updateComment(`${response}${footer()}`)
           }
           // Fork PR
           else {
@@ -468,8 +459,7 @@ export const GithubRunCommand = cmd({
               const summary = await summarize(response)
               await pushToForkBranch(summary, prData, uncommittedChanges)
             }
-            const hasShared = prData.comments.nodes.some((c) => c.body.includes(`${shareBaseUrl}/s/${shareId}`))
-            await updateComment(`${response}${footer({ image: !hasShared })}`)
+            await updateComment(`${response}${footer()}`)
           }
         }
         // Issue
@@ -487,11 +477,11 @@ export const GithubRunCommand = cmd({
               repoData.data.default_branch,
               branch,
               summary,
-              `${response}\n\nCloses #${issueId}${footer({ image: true })}`,
+              `${response}\n\nCloses #${issueId}${footer()}`,
             )
-            await updateComment(`Created PR #${pr}${footer({ image: true })}`)
+            await updateComment(`Created PR #${pr}${footer()}`)
           } else {
-            await updateComment(`${response}${footer({ image: true })}`)
+            await updateComment(`${response}${footer()}`)
           }
         }
       } catch (e: any) {
@@ -966,18 +956,8 @@ Co-authored-by: ${actor} <${actor}@users.noreply.github.com>"`
         return pr.data.number
       }
 
-      function footer(opts?: { image?: boolean }) {
-        const image = (() => {
-          if (!shareId) return ""
-          if (!opts?.image) return ""
-
-          const titleAlt = encodeURIComponent(session.title.substring(0, 50))
-          const title64 = Buffer.from(session.title.substring(0, 700), "utf8").toString("base64")
-
-          return `<a href="${shareBaseUrl}/s/${shareId}"><img width="200" alt="${titleAlt}" src="https://social-cards.sst.dev/opencode-share/${title64}.png?model=${providerID}/${modelID}&version=${session.version}&id=${shareId}" /></a>\n`
-        })()
-        const shareUrl = shareId ? `[opencode session](${shareBaseUrl}/s/${shareId})&nbsp;&nbsp;|&nbsp;&nbsp;` : ""
-        return `\n\n${image}${shareUrl}[github run](${runUrl})`
+      function footer() {
+        return `\n\n[github run](${runUrl})`
       }
 
       async function fetchRepo() {
