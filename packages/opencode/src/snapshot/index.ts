@@ -42,7 +42,8 @@ export namespace Snapshot {
     "*.mkv",
   ].join("\n")
 
-  async function countFiles(dir: string, limit: number): Promise<number> {
+  // Returns file count, or null if permission error encountered (signals unsafe to proceed)
+  async function countFiles(dir: string, limit: number): Promise<number | null> {
     let count = 0
     try {
       const entries = await fs.readdir(dir, { withFileTypes: true })
@@ -52,13 +53,20 @@ export namespace Snapshot {
         if (entry.isDirectory()) {
           // Skip common large directories
           if (["node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build"].includes(entry.name)) continue
-          count += await countFiles(path.join(dir, entry.name), limit - count)
+          const subCount = await countFiles(path.join(dir, entry.name), limit - count)
+          if (subCount === null) return null // propagate permission error
+          count += subCount
         } else {
           count++
         }
       }
-    } catch {
-      // Ignore permission errors etc
+    } catch (err: any) {
+      // Permission denied or other access errors - can't safely snapshot
+      if (err?.code === "EACCES" || err?.code === "EPERM") {
+        log.warn("permission error while counting files", { dir, error: err.code })
+        return null
+      }
+      // Other errors (e.g., ENOENT for race conditions) - just skip that entry
     }
     return count
   }
@@ -94,6 +102,12 @@ export namespace Snapshot {
     // For non-git projects, check file count before proceeding
     if (Instance.project.vcs !== "git") {
       const fileCount = await countFiles(Instance.worktree, MAX_FILE_COUNT + 1)
+      if (fileCount === null) {
+        log.warn("skipping snapshots - permission error accessing directory", {
+          worktree: Instance.worktree,
+        })
+        return
+      }
       if (fileCount > MAX_FILE_COUNT) {
         log.warn("skipping snapshots - too many files in non-git directory", {
           count: fileCount,
