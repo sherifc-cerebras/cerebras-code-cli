@@ -11,7 +11,6 @@ export namespace Snapshot {
   const log = Log.create({ service: "snapshot" })
 
   export async function track() {
-    if (Instance.project.vcs !== "git") return
     const cfg = await Config.get()
     if (cfg.snapshot === false) return
     const git = gitdir()

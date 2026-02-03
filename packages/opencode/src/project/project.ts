@@ -34,7 +34,7 @@ export namespace Project {
     if (!git) {
       const project: Info = {
         id: "global",
-        worktree: "/",
+        worktree: directory,
         vcs: Info.shape.vcs.parse(Flag.OPENCODE_FAKE_VCS),
         time: {
           created: Date.now(),
