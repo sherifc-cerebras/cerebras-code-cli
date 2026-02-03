@@ -1,4 +1,4 @@
-import { $ } from "bun"
+import { $, spawn } from "bun"
 import path from "path"
 import fs from "fs/promises"
 import { Log } from "../util/log"
@@ -10,11 +10,101 @@ import { Instance } from "../project/instance"
 export namespace Snapshot {
   const log = Log.create({ service: "snapshot" })
 
+  // Safeguards for non-git directories
+  const MAX_FILE_COUNT = 5000
+  const GIT_ADD_TIMEOUT_MS = 10000 // 10 seconds
+
+  // Default ignore patterns for snapshot (applied to non-git directories)
+  const DEFAULT_IGNORE_PATTERNS = [
+    "node_modules/",
+    ".git/",
+    "*.log",
+    "*.tmp",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.pyc",
+    "__pycache__/",
+    ".env",
+    ".venv/",
+    "venv/",
+    "dist/",
+    "build/",
+    ".cache/",
+    "*.iso",
+    "*.dmg",
+    "*.zip",
+    "*.tar.gz",
+    "*.rar",
+    "*.7z",
+    "*.mp4",
+    "*.mov",
+    "*.avi",
+    "*.mkv",
+  ].join("\n")
+
+  async function countFiles(dir: string, limit: number): Promise<number> {
+    let count = 0
+    try {
+      const entries = await fs.readdir(dir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (count >= limit) return count
+        if (entry.name.startsWith(".")) continue // skip hidden
+        if (entry.isDirectory()) {
+          // Skip common large directories
+          if (["node_modules", ".git", "venv", ".venv", "__pycache__", "dist", "build"].includes(entry.name)) continue
+          count += await countFiles(path.join(dir, entry.name), limit - count)
+        } else {
+          count++
+        }
+      }
+    } catch {
+      // Ignore permission errors etc
+    }
+    return count
+  }
+
+  async function runWithTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    onTimeout: () => void,
+  ): Promise<T | undefined> {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const timeoutPromise = new Promise<undefined>((resolve) => {
+      timeoutId = setTimeout(() => {
+        onTimeout()
+        resolve(undefined)
+      }, timeoutMs)
+    })
+    try {
+      const result = await Promise.race([promise, timeoutPromise])
+      clearTimeout(timeoutId)
+      return result
+    } catch {
+      clearTimeout(timeoutId)
+      return undefined
+    }
+  }
+
   export async function track() {
     const cfg = await Config.get()
     if (cfg.snapshot === false) return
     const git = gitdir()
-    if (await fs.mkdir(git, { recursive: true })) {
+    const isNewRepo = await fs.mkdir(git, { recursive: true })
+
+    // For non-git projects, check file count before proceeding
+    if (Instance.project.vcs !== "git") {
+      const fileCount = await countFiles(Instance.worktree, MAX_FILE_COUNT + 1)
+      if (fileCount > MAX_FILE_COUNT) {
+        log.warn("skipping snapshots - too many files in non-git directory", {
+          count: fileCount,
+          limit: MAX_FILE_COUNT,
+          worktree: Instance.worktree,
+        })
+        return
+      }
+    }
+
+    if (isNewRepo) {
       await $`git init`
         .env({
           ...process.env,
@@ -25,9 +115,35 @@ export namespace Snapshot {
         .nothrow()
       // Configure git to not convert line endings on Windows
       await $`git --git-dir ${git} config core.autocrlf false`.quiet().nothrow()
+
+      // For non-git directories, add default ignore patterns
+      if (Instance.project.vcs !== "git") {
+        const excludeFile = path.join(git, "info", "exclude")
+        await fs.mkdir(path.dirname(excludeFile), { recursive: true })
+        await fs.writeFile(excludeFile, DEFAULT_IGNORE_PATTERNS)
+        log.info("added default ignore patterns for non-git directory")
+      }
+
       log.info("initialized")
     }
-    await $`git --git-dir ${git} --work-tree ${Instance.worktree} add .`.quiet().cwd(Instance.directory).nothrow()
+
+    // Run git add with timeout for safety
+    const addPromise = $`git --git-dir ${git} --work-tree ${Instance.worktree} add .`
+      .quiet()
+      .cwd(Instance.directory)
+      .nothrow()
+
+    const addResult = await runWithTimeout(addPromise, GIT_ADD_TIMEOUT_MS, () => {
+      log.warn("git add timed out - directory may be too large", {
+        timeout: GIT_ADD_TIMEOUT_MS,
+        worktree: Instance.worktree,
+      })
+    })
+
+    if (!addResult) {
+      return // Timed out
+    }
+
     const hash = await $`git --git-dir ${git} --work-tree ${Instance.worktree} write-tree`
       .quiet()
       .cwd(Instance.directory)

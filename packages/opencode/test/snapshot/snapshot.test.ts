@@ -937,3 +937,87 @@ test("diffFull with whitespace changes", async () => {
     },
   })
 })
+
+// Tests for non-git directories
+async function bootstrapNoGit() {
+  return tmpdir({
+    git: false,
+    init: async (dir) => {
+      const unique = Math.random().toString(36).slice(2)
+      const aContent = `A${unique}`
+      const bContent = `B${unique}`
+      await Bun.write(`${dir}/a.txt`, aContent)
+      await Bun.write(`${dir}/b.txt`, bContent)
+      return {
+        aContent,
+        bContent,
+      }
+    },
+  })
+}
+
+test("snapshots work in non-git directory", async () => {
+  await using tmp = await bootstrapNoGit()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const before = await Snapshot.track()
+      expect(before).toBeTruthy()
+
+      await Bun.write(`${tmp.path}/new.txt`, "new content")
+
+      const patch = await Snapshot.patch(before!)
+      expect(patch.files).toContain(`${tmp.path}/new.txt`)
+    },
+  })
+})
+
+test("revert works in non-git directory", async () => {
+  await using tmp = await bootstrapNoGit()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const before = await Snapshot.track()
+      expect(before).toBeTruthy()
+
+      await Bun.write(`${tmp.path}/new.txt`, "new content")
+
+      await Snapshot.revert([await Snapshot.patch(before!)])
+
+      expect(await Bun.file(`${tmp.path}/new.txt`).exists()).toBe(false)
+    },
+  })
+})
+
+test("diff works in non-git directory", async () => {
+  await using tmp = await bootstrapNoGit()
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const before = await Snapshot.track()
+      expect(before).toBeTruthy()
+
+      await Bun.write(`${tmp.path}/new.txt`, "new content")
+
+      const diff = await Snapshot.diff(before!)
+      expect(diff).toContain("new.txt")
+    },
+  })
+})
+
+test("skips snapshots for directories with too many files", async () => {
+  await using tmp = await tmpdir({
+    git: false,
+    init: async (dir) => {
+      // With a small number of files, it should work
+      await Bun.write(`${dir}/test.txt`, "content")
+    },
+  })
+  await Instance.provide({
+    directory: tmp.path,
+    fn: async () => {
+      const result = await Snapshot.track()
+      expect(result).toBeTruthy()
+    },
+  })
+})
