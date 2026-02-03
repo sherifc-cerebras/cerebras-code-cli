@@ -27,6 +27,7 @@ export namespace Command {
       model: z.string().optional(),
       template: z.string(),
       subtask: z.boolean().optional(),
+      builtin: z.boolean().optional(),
     })
     .meta({
       ref: "Command",
@@ -36,6 +37,7 @@ export namespace Command {
   export const Default = {
     INIT: "init",
     REVIEW: "review",
+    DEBUG: "debug",
   } as const
 
   const state = Instance.state(async () => {
@@ -52,6 +54,12 @@ export namespace Command {
         description: "review changes [commit|branch|pr], defaults to uncommitted",
         template: PROMPT_REVIEW.replace("${path}", Instance.worktree),
         subtask: true,
+      },
+      [Default.DEBUG]: {
+        name: Default.DEBUG,
+        description: "export debug info (config, session, logs)",
+        template: "", // Built-in commands don't use templates
+        builtin: true,
       },
     }
 

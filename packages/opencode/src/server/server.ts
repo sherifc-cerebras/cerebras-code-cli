@@ -24,6 +24,7 @@ import { Vcs } from "../project/vcs"
 import { Agent } from "../agent/agent"
 import { Auth } from "../auth"
 import { Command } from "../command"
+import { BuiltinCommand } from "../command/builtin"
 import { ProviderAuth } from "../provider/auth"
 import { Global } from "../global"
 import { ProjectRoute } from "./project"
@@ -1231,6 +1232,25 @@ export namespace Server {
         async (c) => {
           const sessionID = c.req.valid("param").sessionID
           const body = c.req.valid("json")
+
+          // Check for built-in commands that execute directly
+          const builtinHandler = BuiltinCommand.get(body.command)
+          if (builtinHandler) {
+            const model = body.model
+              ? Provider.parseModel(body.model)
+              : { providerID: "builtin", modelID: "builtin" }
+            const result = await builtinHandler({
+              sessionID,
+              arguments: body.arguments,
+              agent: body.agent ?? "build",
+              model,
+            })
+            return c.json({
+              info: result.assistantMessage,
+              parts: result.assistantParts,
+            })
+          }
+
           const msg = await SessionPrompt.command({ ...body, sessionID })
           return c.json(msg)
         },
