@@ -58,6 +58,22 @@ export const RunCommand = cmd({
         alias: ["m"],
         describe: "model to use in the format of provider/model",
       })
+      .option("multi-agent", {
+        type: "boolean",
+        describe: "enable multi-agent orchestration in plan mode",
+      })
+      .option("max-agents", {
+        type: "number",
+        describe: "maximum number of sub-agents to run when multi-agent orchestration is used",
+      })
+      .option("agent-model", {
+        type: "string",
+        describe: "model for multi-agent sub-agents in provider/model format",
+      })
+      .option("manager-model", {
+        type: "string",
+        describe: "model for the multi-agent manager in provider/model format",
+      })
       .option("agent", {
         type: "string",
         describe: "agent to use",
@@ -88,6 +104,19 @@ export const RunCommand = cmd({
       })
   },
   handler: async (args) => {
+    if (args.multiAgent !== undefined) {
+      process.env.OPENCODE_MULTI_AGENT = String(args.multiAgent)
+    }
+    if (args.maxAgents !== undefined) {
+      process.env.OPENCODE_MULTI_AGENT_MAX_AGENTS = String(args.maxAgents)
+    }
+    if (args.agentModel) {
+      process.env.OPENCODE_MULTI_AGENT_AGENT_MODEL = String(args.agentModel)
+    }
+    if (args.managerModel) {
+      process.env.OPENCODE_MULTI_AGENT_MANAGER_MODEL = String(args.managerModel)
+    }
+
     let message = [...args.message, ...(args["--"] || [])].join(" ")
 
     const fileParts: any[] = []

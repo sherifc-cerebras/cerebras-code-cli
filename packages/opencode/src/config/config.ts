@@ -693,6 +693,14 @@ export namespace Config {
         })
         .optional(),
       tools: z.record(z.string(), z.boolean()).optional(),
+      multi_agent: z
+        .object({
+          enabled: z.boolean().optional().describe("Enable multi-agent orchestration in plan mode"),
+          max_agents: z.number().int().positive().optional().describe("Maximum number of sub-agents to run"),
+          agent_model: z.string().optional().describe("Model for sub-agents in provider/model format"),
+          manager_model: z.string().optional().describe("Model for manager in provider/model format"),
+        })
+        .optional(),
       enterprise: z
         .object({
           url: z.string().optional().describe("Enterprise URL"),

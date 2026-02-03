@@ -177,6 +177,6 @@ export interface Hooks {
   ) => Promise<void>
   "experimental.text.complete"?: (
     input: { sessionID: string; messageID: string; partID: string },
-    output: { text: string },
+    output: { text: string; metadata?: Record<string, any> },
   ) => Promise<void>
 }

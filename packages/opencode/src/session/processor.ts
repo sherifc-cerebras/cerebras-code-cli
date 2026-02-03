@@ -366,14 +366,25 @@ export namespace SessionProcessor {
                         messageID: input.assistantMessage.id,
                         partID: currentText.id,
                       },
-                      { text: currentText.text },
+                      { text: currentText.text, metadata: currentText.metadata },
                     )
                     currentText.text = textOutput.text
                     currentText.time = {
                       start: Date.now(),
                       end: Date.now(),
                     }
-                    if (value.providerMetadata) currentText.metadata = value.providerMetadata
+                    if (value.providerMetadata) {
+                      currentText.metadata = {
+                        ...(currentText.metadata ?? {}),
+                        ...value.providerMetadata,
+                      }
+                    }
+                    if (textOutput.metadata) {
+                      currentText.metadata = {
+                        ...(currentText.metadata ?? {}),
+                        ...textOutput.metadata,
+                      }
+                    }
                     await Session.updatePart(currentText)
                   }
                   currentText = undefined
