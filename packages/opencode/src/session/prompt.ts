@@ -291,38 +291,34 @@ export namespace SessionPrompt {
           
           // Only switch if we're not already in the target mode
           if (targetMode && lastUser.agent !== targetMode) {
-            // Get the model for the target mode
+            // Get the model for the target mode, fall back to current model if not configured
             const modeModelKey = `${targetMode}_model` as keyof typeof switchCfg
             const modeModel = (switchCfg as any)[modeModelKey] as string | undefined
+            const targetModel = modeModel ? Provider.parseModel(modeModel) : lastUser.model
             
-            if (modeModel) {
-              log.info("switching mode via tool", { from: lastUser.agent, to: targetMode, reason })
-              
-              const targetModel = Provider.parseModel(modeModel)
-              const continueMsg = await Session.updateMessage({
-                id: Identifier.ascending("message"),
-                role: "user",
-                sessionID,
-                time: { created: Date.now() },
-                agent: targetMode,
-                model: targetModel,
-              })
-              
-              await Session.updatePart({
-                id: Identifier.ascending("part"),
-                messageID: continueMsg.id,
-                sessionID,
-                type: "text",
-                synthetic: true,
-                text: `Continue with ${targetMode} mode. ${reason}`,
-                time: { start: Date.now(), end: Date.now() },
-              })
-              
-              // Continue the loop with the new mode
-              continue
-            } else {
-              log.warn("mode switch requested but no model configured", { mode: targetMode })
-            }
+            log.info("switching mode via tool", { from: lastUser.agent, to: targetMode, reason, hasSpecificModel: !!modeModel })
+            
+            const continueMsg = await Session.updateMessage({
+              id: Identifier.ascending("message"),
+              role: "user",
+              sessionID,
+              time: { created: Date.now() },
+              agent: targetMode,
+              model: targetModel,
+            })
+            
+            await Session.updatePart({
+              id: Identifier.ascending("part"),
+              messageID: continueMsg.id,
+              sessionID,
+              type: "text",
+              synthetic: true,
+              text: `Continue with ${targetMode} mode. ${reason}`,
+              time: { start: Date.now(), end: Date.now() },
+            })
+            
+            // Continue the loop with the new mode
+            continue
           }
         }
       }

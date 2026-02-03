@@ -168,6 +168,17 @@ export namespace Agent {
         mode: "primary",
         builtIn: true,
       },
+      docs: {
+        name: "docs",
+        description: "Documentation agent for writing and updating documentation",
+        options: {},
+        permission: agentPermission,
+        tools: {
+          ...defaultTools,
+        },
+        mode: "primary",
+        builtIn: true,
+      },
     }
     for (const [key, value] of Object.entries(cfg.agent ?? {})) {
       if (value.disable) {
