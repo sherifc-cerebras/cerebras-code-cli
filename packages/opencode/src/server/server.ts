@@ -1088,6 +1088,70 @@ export namespace Server {
         },
       )
       .get(
+        "/snapshot/history",
+        describeRoute({
+          summary: "Get commit history",
+          description: "Get the snapshot commit history for the current project.",
+          operationId: "snapshot.history",
+          responses: {
+            200: {
+              description: "List of commits",
+              content: {
+                "application/json": {
+                  schema: resolver(Snapshot.CommitInfo.array()),
+                },
+              },
+            },
+            ...errors(400),
+          },
+        }),
+        validator(
+          "query",
+          z.object({
+            limit: z.coerce.number().optional().meta({ description: "Maximum number of commits to return" }),
+            sessionID: z.string().optional().meta({ description: "Filter by session ID" }),
+          }),
+        ),
+        async (c) => {
+          const query = c.req.valid("query")
+          const history = await Snapshot.history({ limit: query.limit, sessionID: query.sessionID })
+          return c.json(history)
+        },
+      )
+      .post(
+        "/snapshot/restore",
+        describeRoute({
+          summary: "Restore to snapshot",
+          description: "Restore files to a specific snapshot commit.",
+          operationId: "snapshot.restore",
+          responses: {
+            200: {
+              description: "Success",
+              content: {
+                "application/json": {
+                  schema: resolver(z.object({ success: z.boolean(), error: z.string().optional() })),
+                },
+              },
+            },
+            ...errors(400),
+          },
+        }),
+        validator(
+          "json",
+          z.object({
+            hash: z.string().meta({ description: "The commit hash to restore to" }),
+          }),
+        ),
+        async (c) => {
+          const body = c.req.valid("json")
+          const result = await Snapshot.restore(body.hash)
+          if (!result.success) {
+            return c.json({ success: false, error: result.error }, 400)
+          }
+          return c.json({ success: true })
+        },
+      )
+      .get(
         "/session/:sessionID/message/:messageID",
         describeRoute({
           summary: "Get message",

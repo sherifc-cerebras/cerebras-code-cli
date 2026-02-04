@@ -6,6 +6,7 @@ import {
   For,
   Match,
   on,
+  onCleanup,
   Show,
   Switch,
   useContext,
@@ -55,6 +56,8 @@ import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
 import { Sidebar } from "./sidebar"
+import { CommitTimeline } from "./commit-timeline"
+import type { Snapshot } from "@/snapshot"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
 import parsers from "../../../../../../parsers-config.ts"
 import { Clipboard } from "../../util/clipboard"
@@ -152,6 +155,12 @@ export function Session() {
   const [showDetails, setShowDetails] = createSignal(kv.get("tool_details_visibility", true))
   const [showScrollbar, setShowScrollbar] = createSignal(kv.get("scrollbar_visible", false))
   const [diffWrapMode, setDiffWrapMode] = createSignal<"word" | "none">("word")
+  
+  // Commit timeline state
+  const [showCommitTimeline, setShowCommitTimeline] = createSignal(false)
+  const [commits, setCommits] = createSignal<Snapshot.CommitInfo[]>([])
+  const [commitsLoading, setCommitsLoading] = createSignal(false)
+  const [activeCommitHash, setActiveCommitHash] = createSignal<string | undefined>()
 
   const wide = createMemo(() => dimensions().width > 120)
   const sidebarVisible = createMemo(() => {
@@ -160,7 +169,12 @@ export function Session() {
     if (sidebar() === "auto" && wide()) return true
     return false
   })
-  const contentWidth = createMemo(() => dimensions().width - (sidebarVisible() ? 42 : 0) - 4)
+  const contentWidth = createMemo(() => {
+    let width = dimensions().width - 4
+    if (sidebarVisible() && !showCommitTimeline()) width -= 42
+    if (showCommitTimeline()) width -= 40 // Commit timeline width
+    return width
+  })
 
   const scrollAcceleration = createMemo(() => {
     const tui = sync.data.config.tui
@@ -192,6 +206,105 @@ export function Session() {
 
   const toast = useToast()
   const sdk = useSDK()
+
+  // Fetch commits for the timeline (filtered by current session)
+  const fetchCommits = async () => {
+    if (commitsLoading()) return
+    setCommitsLoading(true)
+    try {
+      // Direct fetch since SDK may not have this endpoint yet
+      const response = await fetch(`${sdk.baseUrl}/snapshot/history?limit=100&sessionID=${route.sessionID}`)
+      if (response.ok) {
+        const data = await response.json()
+        setCommits(data)
+      }
+    } catch (e) {
+      console.error("Failed to fetch commits:", e)
+    } finally {
+      setCommitsLoading(false)
+    }
+  }
+
+  // Fetch commits when timeline is shown
+  createEffect(() => {
+    if (showCommitTimeline()) {
+      fetchCommits()
+    }
+  })
+  
+  // Initialize activeHash to the most recent commit (current state)
+  createEffect(() => {
+    if (commits().length > 0 && !activeCommitHash()) {
+      setActiveCommitHash(commits()[0].hash)
+    }
+  })
+  
+
+  // Revert to commit and scroll to message
+  const revertToCommit = async (commit: Snapshot.CommitInfo) => {
+    // Restore files to this commit's state via API
+    const res = await fetch(`${sdk.baseUrl}/snapshot/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ hash: commit.hash }),
+    })
+    
+    const data = await res.json().catch(() => ({}))
+    
+    if (res.ok && data.success) {
+      setActiveCommitHash(commit.hash)
+      toast.show({
+        message: `Restored to: ${commit.message}`,
+        variant: "success",
+      })
+    } else {
+      toast.show({
+        message: data.error || "Failed to restore",
+        variant: "error",
+      })
+      return
+    }
+    
+    // Scroll to the associated message
+    if (!scroll) return
+    
+    // Try to find message by messageID first
+    if (commit.messageID) {
+      const child = scroll.getChildren().find((child) => {
+        return child.id === commit.messageID
+      })
+      if (child) {
+        scroll.scrollTo(child.y)
+        return
+      }
+    }
+    
+    // Fallback: find closest message by timestamp
+    const msgs = messages()
+    const commitTime = commit.timestamp
+    let closest = msgs[0]
+    if (!closest) {
+      scroll.scrollTo(0)
+      return
+    }
+    
+    let closestDiff = Math.abs(closest.time.created - commitTime)
+    
+    for (const msg of msgs) {
+      const diff = Math.abs(msg.time.created - commitTime)
+      if (diff < closestDiff) {
+        closest = msg
+        closestDiff = diff
+      }
+    }
+    
+    const child = scroll.getChildren().find((c) => c.id === closest.id)
+    if (child) {
+      scroll.scrollTo(child.y)
+    } else {
+      scroll.scrollTo(0)
+    }
+  }
 
   // Auto-navigate to whichever session currently needs permission input
   createEffect(() => {
@@ -268,6 +381,15 @@ export function Session() {
   }
 
   const command = useCommandDialog()
+  
+  // Suspend global keybinds when commit timeline is open
+  createEffect(() => {
+    if (showCommitTimeline()) {
+      command.keybinds(false)
+      onCleanup(() => command.keybinds(true))
+    }
+  })
+  
   command.register(() => [
     ...(sync.data.config.share !== "disabled"
       ? [
@@ -431,6 +553,16 @@ export function Session() {
         })
         if (sidebar() === "show") kv.set("sidebar", "auto")
         if (sidebar() === "hide") kv.set("sidebar", "hide")
+        dialog.clear()
+      },
+    },
+    {
+      title: showCommitTimeline() ? "Hide commit timeline" : "Show commit timeline",
+      value: "session.commits.toggle",
+      keybind: "commits_toggle",
+      category: "Session",
+      onSelect: (dialog) => {
+        setShowCommitTimeline((prev) => !prev)
         dialog.clear()
       },
     },
@@ -980,7 +1112,7 @@ export function Session() {
                   prompt = r
                   promptRef.set(r)
                 }}
-                disabled={permissions().length > 0}
+                disabled={permissions().length > 0 || showCommitTimeline()}
                 onSubmit={() => {
                   toBottom()
                 }}
@@ -993,8 +1125,18 @@ export function Session() {
           </Show>
           <Toast />
         </box>
-        <Show when={sidebarVisible()}>
+        <Show when={sidebarVisible() && !showCommitTimeline()}>
           <Sidebar sessionID={route.sessionID} />
+        </Show>
+        <Show when={showCommitTimeline()}>
+          <CommitTimeline
+            sessionID={route.sessionID}
+            commits={commits()}
+            onSelectCommit={revertToCommit}
+            onClose={() => setShowCommitTimeline(false)}
+            active={showCommitTimeline()}
+            activeHash={activeCommitHash()}
+          />
         </Show>
       </box>
     </context.Provider>

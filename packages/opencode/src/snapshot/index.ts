@@ -10,6 +10,19 @@ import { Instance } from "../project/instance"
 export namespace Snapshot {
   const log = Log.create({ service: "snapshot" })
 
+  // Commit metadata schema
+  export const CommitInfo = z.object({
+    hash: z.string(),
+    treeHash: z.string(),
+    parentHash: z.string().optional(),
+    message: z.string(),
+    messageID: z.string().optional(),
+    sessionID: z.string().optional(),
+    files: z.string().array(),
+    timestamp: z.number(),
+  })
+  export type CommitInfo = z.infer<typeof CommitInfo>
+
   // Safeguards for non-git directories
   const MAX_FILE_COUNT = 5000
   const GIT_ADD_TIMEOUT_MS = 10000 // 10 seconds
@@ -93,7 +106,33 @@ export namespace Snapshot {
     }
   }
 
-  export async function track() {
+  export interface TrackOptions {
+    message?: string
+    messageID?: string
+    sessionID?: string
+  }
+
+  // Get the current HEAD commit hash (if any)
+  async function getHead(): Promise<string | undefined> {
+    const git = gitdir()
+    const headFile = path.join(git, "refs", "heads", "opencode")
+    try {
+      const content = await fs.readFile(headFile, "utf-8")
+      return content.trim() || undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  // Update the HEAD ref to point to a new commit
+  async function updateHead(commitHash: string): Promise<void> {
+    const git = gitdir()
+    const refsDir = path.join(git, "refs", "heads")
+    await fs.mkdir(refsDir, { recursive: true })
+    await fs.writeFile(path.join(refsDir, "opencode"), commitHash + "\n")
+  }
+
+  export async function track(options: TrackOptions = {}): Promise<string | undefined> {
     const cfg = await Config.get()
     if (cfg.snapshot === false) return
     const git = gitdir()
@@ -158,13 +197,238 @@ export namespace Snapshot {
       return // Timed out
     }
 
+    // Write tree to get the tree hash
+    const treeHash = (
+      await $`git --git-dir ${git} --work-tree ${Instance.worktree} write-tree`
+        .quiet()
+        .cwd(Instance.directory)
+        .nothrow()
+        .text()
+    ).trim()
+
+    if (!treeHash) {
+      log.warn("failed to write tree")
+      return
+    }
+
+    // Get parent commit (if any)
+    const parentHash = await getHead()
+
+    // Check if tree has changed from parent
+    if (parentHash) {
+      const parentTreeHash = (
+        await $`git --git-dir ${git} rev-parse ${parentHash}^{tree}`.quiet().nothrow().text()
+      ).trim()
+
+      // If tree hasn't changed, return the parent commit hash
+      if (parentTreeHash === treeHash) {
+        log.info("no changes, returning existing commit", { parentHash, treeHash })
+        return parentHash
+      }
+    }
+
+    // Build commit message with metadata
+    const message = options.message || "Snapshot"
+    const metadata: Record<string, string> = {}
+    if (options.messageID) metadata.messageID = options.messageID
+    if (options.sessionID) metadata.sessionID = options.sessionID
+
+    const commitMessage =
+      Object.keys(metadata).length > 0
+        ? `${message}\n\n---\n${Object.entries(metadata)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join("\n")}`
+        : message
+
+    // Create commit with commit-tree
+    const commitArgs = parentHash ? ["-p", parentHash] : []
+    const commitHash = (
+      await $`git --git-dir ${git} commit-tree ${treeHash} ${commitArgs} -m ${commitMessage}`
+        .quiet()
+        .cwd(Instance.directory)
+        .nothrow()
+        .text()
+    ).trim()
+
+    if (!commitHash) {
+      log.warn("failed to create commit")
+      return treeHash // Fall back to tree hash for backwards compatibility
+    }
+
+    // Update HEAD ref
+    await updateHead(commitHash)
+
+    log.info("tracking", { commitHash, treeHash, parentHash, message, cwd: Instance.directory, git })
+    return commitHash
+  }
+
+  // Legacy track function for backwards compatibility (returns tree hash)
+  export async function trackTree(): Promise<string | undefined> {
+    const cfg = await Config.get()
+    if (cfg.snapshot === false) return
+    const git = gitdir()
+    await fs.mkdir(git, { recursive: true })
+
+    await $`git --git-dir ${git} --work-tree ${Instance.worktree} add .`
+      .quiet()
+      .cwd(Instance.directory)
+      .nothrow()
+
     const hash = await $`git --git-dir ${git} --work-tree ${Instance.worktree} write-tree`
       .quiet()
       .cwd(Instance.directory)
       .nothrow()
       .text()
-    log.info("tracking", { hash, cwd: Instance.directory, git })
     return hash.trim()
+  }
+
+  // Parse commit metadata from commit message body
+  function parseCommitMetadata(body: string): { messageID?: string; sessionID?: string } {
+    const metadata: { messageID?: string; sessionID?: string } = {}
+    const lines = body.split("\n")
+    for (const line of lines) {
+      const match = line.match(/^(\w+):\s*(.+)$/)
+      if (match) {
+        const [, key, value] = match
+        if (key === "messageID") metadata.messageID = value
+        if (key === "sessionID") metadata.sessionID = value
+      }
+    }
+    return metadata
+  }
+
+  // Get commit history
+  export async function history(options: { limit?: number; sessionID?: string } = {}): Promise<CommitInfo[]> {
+    const git = gitdir()
+    // Fetch more than limit if filtering by sessionID, since we'll filter after
+    const fetchLimit = options.sessionID ? (options.limit ?? 100) * 3 : (options.limit ?? 100)
+
+    // Check if repo exists
+    try {
+      await fs.access(git)
+    } catch {
+      return []
+    }
+
+    // Get commit log with format: hash|tree|parent|timestamp|subject|body
+    // Use %x00 (null byte) as record separator to handle multiline bodies
+    const format = "%H|%T|%P|%ct|%s|%b%x00"
+    const result = await $`git --git-dir ${git} log --format=${format} -n ${fetchLimit} opencode`
+      .quiet()
+      .cwd(Instance.directory)
+      .nothrow()
+      .text()
+
+    if (!result.trim()) {
+      return []
+    }
+
+    const commits: CommitInfo[] = []
+    // Split by null byte to get each commit record
+    const records = result.split("\x00").filter((r) => r.trim())
+
+    for (const record of records) {
+      const parts = record.trim().split("|")
+      if (parts.length < 5) continue
+      const [hash, treeHash, parentHash, timestamp, subject, ...bodyParts] = parts
+      const body = bodyParts.join("|")
+      const metadata = parseCommitMetadata(body)
+
+      // Skip if filtering by sessionID and doesn't match
+      if (options.sessionID && metadata.sessionID !== options.sessionID) {
+        continue
+      }
+
+      // Get files changed in this commit
+      let files: string[] = []
+      if (parentHash) {
+        const diffResult = await $`git --git-dir ${git} diff --name-only ${parentHash} ${hash}`
+          .quiet()
+          .cwd(Instance.directory)
+          .nothrow()
+          .text()
+        files = diffResult
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((f) => path.join(Instance.worktree, f))
+      } else {
+        // First commit - list all files
+        const lsResult = await $`git --git-dir ${git} ls-tree -r --name-only ${hash}`
+          .quiet()
+          .cwd(Instance.directory)
+          .nothrow()
+          .text()
+        files = lsResult
+          .trim()
+          .split("\n")
+          .filter(Boolean)
+          .map((f) => path.join(Instance.worktree, f))
+      }
+
+      commits.push({
+        hash,
+        treeHash,
+        parentHash: parentHash || undefined,
+        message: subject,
+        messageID: metadata.messageID,
+        sessionID: metadata.sessionID,
+        files,
+        timestamp: parseInt(timestamp) * 1000, // Convert to milliseconds
+      })
+
+      // Apply limit after filtering
+      if (commits.length >= (options.limit ?? 100)) {
+        break
+      }
+    }
+
+    return commits
+  }
+
+  // Get a specific commit's info
+  export async function getCommit(hash: string): Promise<CommitInfo | undefined> {
+    const git = gitdir()
+    const format = "%H|%T|%P|%ct|%s|%b"
+    const result = await $`git --git-dir ${git} show --format=${format} -s ${hash}`
+      .quiet()
+      .cwd(Instance.directory)
+      .nothrow()
+      .text()
+
+    if (!result.trim()) {
+      return undefined
+    }
+
+    const [commitHash, treeHash, parentHash, timestamp, subject, ...bodyParts] = result.trim().split("|")
+    const body = bodyParts.join("|")
+    const metadata = parseCommitMetadata(body)
+
+    // Get files changed
+    let files: string[] = []
+    if (parentHash) {
+      const diffResult = await $`git --git-dir ${git} diff --name-only ${parentHash} ${commitHash}`
+        .quiet()
+        .cwd(Instance.directory)
+        .nothrow()
+        .text()
+      files = diffResult
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map((f) => path.join(Instance.worktree, f))
+    }
+
+    return {
+      hash: commitHash,
+      treeHash,
+      parentHash: parentHash || undefined,
+      message: subject,
+      messageID: metadata.messageID,
+      sessionID: metadata.sessionID,
+      files,
+      timestamp: parseInt(timestamp) * 1000,
+    }
   }
 
   export const Patch = z.object({
@@ -200,23 +464,68 @@ export namespace Snapshot {
     }
   }
 
-  export async function restore(snapshot: string) {
-    log.info("restore", { commit: snapshot })
+  export async function restore(snapshot: string): Promise<{ success: boolean; error?: string }> {
+    log.info("restore", { commit: snapshot, worktree: Instance.worktree })
     const git = gitdir()
-    const result =
-      await $`git --git-dir ${git} --work-tree ${Instance.worktree} read-tree ${snapshot} && git --git-dir ${git} --work-tree ${Instance.worktree} checkout-index -a -f`
+    
+    // Get list of files in the target snapshot
+    const snapshotFiles = await $`git --git-dir ${git} ls-tree -r --name-only ${snapshot}`
+      .quiet()
+      .cwd(Instance.worktree)
+      .nothrow()
+      .text()
+    
+    const filesInSnapshot = new Set(snapshotFiles.trim().split("\n").filter(Boolean))
+    
+    // Get list of files currently tracked (in the current index)
+    const currentHead = await getHead()
+    if (currentHead) {
+      const currentFiles = await $`git --git-dir ${git} ls-tree -r --name-only ${currentHead}`
         .quiet()
         .cwd(Instance.worktree)
         .nothrow()
-
-    if (result.exitCode !== 0) {
-      log.error("failed to restore snapshot", {
-        snapshot,
-        exitCode: result.exitCode,
-        stderr: result.stderr.toString(),
-        stdout: result.stdout.toString(),
-      })
+        .text()
+      
+      // Delete files that exist now but not in the target snapshot
+      for (const file of currentFiles.trim().split("\n").filter(Boolean)) {
+        if (!filesInSnapshot.has(file)) {
+          const fullPath = path.join(Instance.worktree, file)
+          try {
+            await fs.unlink(fullPath)
+            log.info("deleted file not in snapshot", { file })
+          } catch {
+            // File might already be deleted or not exist
+          }
+        }
+      }
     }
+    
+    // Read the tree into the index
+    const readTree = await $`git --git-dir ${git} --work-tree ${Instance.worktree} read-tree ${snapshot}`
+      .quiet()
+      .cwd(Instance.worktree)
+      .nothrow()
+    
+    if (readTree.exitCode !== 0) {
+      const error = `read-tree failed: ${readTree.stderr.toString()}`
+      log.error("failed to read tree", { snapshot, error })
+      return { success: false, error }
+    }
+    
+    // Checkout the files from the index
+    const checkout = await $`git --git-dir ${git} --work-tree ${Instance.worktree} checkout-index -a -f`
+      .quiet()
+      .cwd(Instance.worktree)
+      .nothrow()
+
+    if (checkout.exitCode !== 0) {
+      const error = `checkout-index failed: ${checkout.stderr.toString()}`
+      log.error("failed to checkout index", { snapshot, error })
+      return { success: false, error }
+    }
+    
+    log.info("restore complete", { snapshot })
+    return { success: true }
   }
 
   export async function revert(patches: Patch[]) {

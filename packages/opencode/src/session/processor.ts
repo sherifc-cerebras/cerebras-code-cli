@@ -17,6 +17,39 @@ import { Telemetry } from "@/telemetry"
 export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
   const log = Log.create({ service: "session.processor" })
+  
+  // Create a short summary of what a tool did for commit messages
+  function getToolSummary(toolName: string, input: Record<string, any>): string {
+    const path = input.path || input.filePath || input.file
+    const filename = path ? path.split("/").pop() : undefined
+    
+    switch (toolName) {
+      case "write":
+        return filename ? `write ${filename}` : "write file"
+      case "edit":
+      case "str_replace":
+        return filename ? `edit ${filename}` : "edit file"
+      case "read":
+        return filename ? `read ${filename}` : "read file"
+      case "bash":
+        const cmd = input.command?.split(" ")[0]?.split("/").pop()
+        return cmd ? `bash ${cmd}` : "bash"
+      case "glob":
+        return "search files"
+      case "grep":
+        return input.pattern ? `grep ${input.pattern.slice(0, 20)}` : "grep"
+      case "ls":
+        return "list files"
+      case "webfetch":
+        return "fetch url"
+      case "task":
+        return "run task"
+      case "todowrite":
+        return "update todos"
+      default:
+        return toolName
+    }
+  }
 
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
@@ -41,6 +74,7 @@ export namespace SessionProcessor {
     let snapshot: string | undefined
     let blocked = false
     let attempt = 0
+    let stepTools: string[] = []
 
     const result = {
       get message() {
@@ -131,6 +165,12 @@ export namespace SessionProcessor {
                 case "tool-call": {
                   const match = toolcalls[value.toolCallId]
                   if (match) {
+                    // Track tool for commit message
+                    const toolSummary = getToolSummary(value.toolName, value.input)
+                    if (toolSummary && !stepTools.includes(toolSummary)) {
+                      stepTools.push(toolSummary)
+                    }
+                    
                     const part = await Session.updatePart({
                       ...match,
                       tool: value.toolName,
@@ -240,7 +280,12 @@ export namespace SessionProcessor {
                   throw value.error
 
                 case "start-step":
-                  snapshot = await Snapshot.track()
+                  stepTools = []
+                  snapshot = await Snapshot.track({
+                    message: "Before changes",
+                    messageID: input.assistantMessage.id,
+                    sessionID: input.sessionID,
+                  })
                   await Session.updatePart({
                     id: Identifier.ascending("part"),
                     messageID: input.assistantMessage.id,
@@ -259,10 +304,19 @@ export namespace SessionProcessor {
                   input.assistantMessage.finish = value.finishReason
                   input.assistantMessage.cost += usage.cost
                   input.assistantMessage.tokens = usage.tokens
+                  // Create descriptive commit message from tools used
+                  const commitMessage = stepTools.length > 0 
+                    ? stepTools.slice(0, 3).join(", ") + (stepTools.length > 3 ? ` +${stepTools.length - 3} more` : "")
+                    : "After changes"
+                  const finishSnapshot = await Snapshot.track({
+                    message: commitMessage,
+                    messageID: input.assistantMessage.id,
+                    sessionID: input.sessionID,
+                  })
                   await Session.updatePart({
                     id: Identifier.ascending("part"),
                     reason: value.finishReason,
-                    snapshot: await Snapshot.track(),
+                    snapshot: finishSnapshot,
                     messageID: input.assistantMessage.id,
                     sessionID: input.assistantMessage.sessionID,
                     type: "step-finish",
