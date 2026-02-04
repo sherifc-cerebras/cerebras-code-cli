@@ -352,6 +352,11 @@ export function Autocomplete(props: {
         onSelect: () => command.trigger("provider.connect"),
       },
       {
+        display: "/api-key",
+        description: "manage API keys",
+        onSelect: () => command.trigger("api_key.manage"),
+      },
+      {
         display: "/help",
         description: "show help",
         onSelect: () => command.trigger("help.show"),

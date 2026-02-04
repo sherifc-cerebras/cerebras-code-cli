@@ -23,6 +23,7 @@ import { DialogFeedback, type FeedbackMetadata } from "./component/dialog-feedba
 import { CommandProvider, useCommandDialog } from "@tui/component/dialog-command"
 import { DialogAgent } from "@tui/component/dialog-agent"
 import { DialogSessionList } from "@tui/component/dialog-session-list"
+import { DialogApiKey } from "./component/dialog-api-key"
 import { KeybindProvider } from "@tui/context/keybind"
 import { ThemeProvider, useTheme } from "@tui/context/theme"
 import { Home } from "@tui/routes/home"
@@ -184,7 +185,9 @@ function App() {
   const exit = useExit()
   const promptRef = usePromptRef()
   const [bannerNotification, setBannerNotification] = createSignal<import("@/notification").Notification | null>(null)
-  const [fullscreenNotification, setFullscreenNotification] = createSignal<import("@/notification").Notification | null>(null)
+  const [fullscreenNotification, setFullscreenNotification] = createSignal<
+    import("@/notification").Notification | null
+  >(null)
   const [showOnboarding, setShowOnboarding] = createSignal(false)
   const [showQuickStart, setShowQuickStart] = createSignal(false)
 
@@ -233,7 +236,6 @@ function App() {
         })
       }
     })
-
   })
 
   // Check for notifications (but not for first-time users who will see onboarding)
@@ -241,11 +243,11 @@ function App() {
   createEffect(() => {
     if (notificationChecked) return
     if (!kv.ready) return
-    
+
     // Skip notifications for first-time users - they'll see onboarding instead
     const hasSeenOnboarding = kv.get("hasSeenCerebrasOnboarding", false)
     if (!hasSeenOnboarding) return
-    
+
     notificationChecked = true
     Notification.check().then((notif) => {
       if (!notif) return
@@ -283,10 +285,10 @@ function App() {
     if (onboardingTriggered) return
     if (sync.status !== "complete") return
     if (!kv.ready) return
-    
+
     const cerebrasConnected = sync.data.provider.some((p) => p.id === "cerebras")
     const hasSeenOnboarding = kv.get("hasSeenCerebrasOnboarding", false)
-    
+
     if (!cerebrasConnected && !hasSeenOnboarding) {
       onboardingTriggered = true
       setShowOnboarding(true)
@@ -300,10 +302,10 @@ function App() {
     if (showOnboarding()) return // Wait for Cerebras onboarding to finish
     if (sync.status !== "complete") return
     if (!kv.ready) return
-    
+
     const hasSeenQuickStart = kv.get("hasSeenQuickStart", false)
     const cerebrasConnected = sync.data.provider.some((p) => p.id === "cerebras")
-    
+
     // Show quick start for users who just completed Cerebras setup or already have it
     if (cerebrasConnected && !hasSeenQuickStart) {
       quickStartTriggered = true
@@ -314,14 +316,14 @@ function App() {
   // Handle quick start prompt selection - submit to new session
   const handleQuickStartSelect = async (prompt: string) => {
     setShowQuickStart(false)
-    
+
     // Create a new session and submit the prompt
     const selectedModel = local.model.current()
     if (!selectedModel) return
-    
+
     const sessionID = await sdk.client.session.create({}).then((x) => x.data!.id)
     const messageID = Identifier.ascending("message")
-    
+
     // Submit the prompt
     sdk.client.session.prompt({
       sessionID,
@@ -337,7 +339,7 @@ function App() {
         },
       ],
     })
-    
+
     // Navigate to the session
     setTimeout(() => {
       route.navigate({ type: "session", sessionID })
@@ -444,6 +446,15 @@ function App() {
       suggested: !connected(),
       onSelect: () => {
         dialog.replace(() => <DialogProviderList />)
+      },
+      category: "Provider",
+    },
+    {
+      title: "Manage API keys",
+      value: "api_key.manage",
+      suggested: connected(),
+      onSelect: () => {
+        dialog.replace(() => <DialogApiKey />)
       },
       category: "Provider",
     },
@@ -592,7 +603,6 @@ function App() {
     },
   ])
 
-
   event.on(TuiEvent.CommandExecute.type, (evt) => {
     command.trigger(evt.properties.command)
   })
@@ -632,8 +642,14 @@ function App() {
     })()
 
     // Don't show error toast for retryable errors (rate limits) - we show a custom PayGo modal instead
-    const isRetryable = error && typeof error === "object" && "data" in error && 
-      error.data && typeof error.data === "object" && "isRetryable" in error.data && error.data.isRetryable === true
+    const isRetryable =
+      error &&
+      typeof error === "object" &&
+      "data" in error &&
+      error.data &&
+      typeof error.data === "object" &&
+      "isRetryable" in error.data &&
+      error.data.isRetryable === true
 
     if (isRetryable) {
       // Track rate limit hits per session
@@ -642,7 +658,7 @@ function App() {
         const currentCount = sessionRateLimitCounts.get(sessionID) || 0
         const newCount = currentCount + 1
         sessionRateLimitCounts.set(sessionID, newCount)
-        
+
         // Show paywall modal on second rate limit hit (unless dismissed forever)
         if (newCount === 2 && !kv.get("rate_limit_modal_dismissed", false)) {
           DialogRateLimit.showAuto(dialog, () => {
@@ -662,18 +678,17 @@ function App() {
     // For non-retryable errors, prompt user to report
     // Gather metadata for feedback form
     const currentModel = local.model.current()
-    
+
     // Extract error information
     let errorName: string | undefined
     let errorMessage: string | undefined
     let errorData: unknown
-    
+
     if (error && typeof error === "object") {
       errorName = error.name
       if (error.data && typeof error.data === "object") {
-        errorMessage = "message" in error.data && typeof error.data.message === "string"
-          ? error.data.message
-          : undefined
+        errorMessage =
+          "message" in error.data && typeof error.data.message === "string" ? error.data.message : undefined
         // Include full error data but ensure it's serializable
         errorData = {
           ...error.data,
@@ -685,13 +700,15 @@ function App() {
         }
       }
     }
-    
+
     const metadata: FeedbackMetadata = {
-      error: errorName ? {
-        name: errorName,
-        message: errorMessage,
-        data: errorData,
-      } : undefined,
+      error: errorName
+        ? {
+            name: errorName,
+            message: errorMessage,
+            data: errorData,
+          }
+        : undefined,
       sessionID: evt.properties.sessionID,
       providerID: currentModel?.providerID,
       modelID: currentModel?.modelID,
@@ -701,7 +718,6 @@ function App() {
       dialog.replace(() => <DialogFeedback onClose={() => dialog.clear()} metadata={metadata} />)
     }, 500)
   })
-
 
   event.on(Installation.Event.UpdateAvailable.type, (evt) => {
     toast.show({
@@ -715,18 +731,18 @@ function App() {
   // Rate limit handling - track retry state, suggest PayGo with exponential backoff (persisted across sessions)
   if (!rateLimitHandlerRegistered) {
     rateLimitHandlerRegistered = true
-    
+
     event.on(SessionStatus.Event.Status.type, (evt) => {
       const { status } = evt.properties
       const wasInRetry = isInRetryState
       isInRetryState = status.type === "retry"
-      
+
       // Show toast when first entering retry
       if (isInRetryState && !wasInRetry) {
         // Get persisted values from KV store (defaults: count=0, nextAt=1)
         const rateLimitCount = kv.get("rateLimitCount", 0) + 1
         const nextPayGoSuggestionAt = kv.get("nextPayGoSuggestionAt", 1)
-        
+
         // Update the count
         kv.set("rateLimitCount", rateLimitCount)
 
@@ -776,20 +792,10 @@ function App() {
         }
       }}
     >
-      <Show
-        when={!showOnboarding()}
-        fallback={
-          <CerebrasOnboarding onComplete={() => setShowOnboarding(false)} />
-        }
-      >
+      <Show when={!showOnboarding()} fallback={<CerebrasOnboarding onComplete={() => setShowOnboarding(false)} />}>
         <Show
           when={!showQuickStart()}
-          fallback={
-            <QuickStartOnboarding
-              onSelect={handleQuickStartSelect}
-              onSkip={() => setShowQuickStart(false)}
-            />
-          }
+          fallback={<QuickStartOnboarding onSelect={handleQuickStartSelect} onSkip={() => setShowQuickStart(false)} />}
         >
           <Show
             when={!fullscreenNotification()}
