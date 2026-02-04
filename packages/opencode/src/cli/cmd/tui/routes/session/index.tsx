@@ -6,7 +6,6 @@ import {
   For,
   Match,
   on,
-  onCleanup,
   Show,
   Switch,
   useContext,
@@ -55,7 +54,6 @@ import { DialogConfirm } from "@tui/ui/dialog-confirm"
 import { DialogPrompt } from "@tui/ui/dialog-prompt"
 import { DialogTimeline } from "./dialog-timeline"
 import { DialogSessionRename } from "../../component/dialog-session-rename"
-import { Sidebar } from "./sidebar"
 import { CommitTimeline } from "./commit-timeline"
 import type { Snapshot } from "@/snapshot"
 import { LANGUAGE_EXTENSIONS } from "@/lsp/language"
@@ -147,7 +145,6 @@ export function Session() {
   })
 
   const dimensions = useTerminalDimensions()
-  const [sidebar, setSidebar] = createSignal<"show" | "hide" | "auto">(kv.get("sidebar", "auto"))
   const [conceal, setConceal] = createSignal(true)
   const [showThinking, setShowThinking] = createSignal(kv.get("thinking_visibility", true))
   const [showTimestamps, setShowTimestamps] = createSignal(kv.get("timestamps", "hide") === "show")
@@ -156,23 +153,21 @@ export function Session() {
   const [showScrollbar, setShowScrollbar] = createSignal(kv.get("scrollbar_visible", false))
   const [diffWrapMode, setDiffWrapMode] = createSignal<"word" | "none">("word")
   
-  // Commit timeline state
-  const [showCommitTimeline, setShowCommitTimeline] = createSignal(false)
+  // Commit timeline state - show by default
+  const [showCommitTimeline, setShowCommitTimeline] = createSignal(true)
   const [commits, setCommits] = createSignal<Snapshot.CommitInfo[]>([])
   const [commitsLoading, setCommitsLoading] = createSignal(false)
   const [activeCommitHash, setActiveCommitHash] = createSignal<string | undefined>()
 
   const wide = createMemo(() => dimensions().width > 120)
-  const sidebarVisible = createMemo(() => {
+  // Show commit timeline when wide enough (replaces old sidebar)
+  const timelineVisible = createMemo(() => {
     if (session()?.parentID) return false
-    if (sidebar() === "show") return true
-    if (sidebar() === "auto" && wide()) return true
-    return false
+    return wide() && showCommitTimeline()
   })
   const contentWidth = createMemo(() => {
     let width = dimensions().width - 4
-    if (sidebarVisible() && !showCommitTimeline()) width -= 42
-    if (showCommitTimeline()) width -= 40 // Commit timeline width
+    if (timelineVisible()) width -= 45 // Commit timeline width
     return width
   })
 
@@ -213,7 +208,7 @@ export function Session() {
     setCommitsLoading(true)
     try {
       // Direct fetch since SDK may not have this endpoint yet
-      const response = await fetch(`${sdk.baseUrl}/snapshot/history?limit=100&sessionID=${route.sessionID}`)
+      const response = await fetch(`${sdk.baseUrl}/snapshot/history?limit=4&sessionID=${route.sessionID}`)
       if (response.ok) {
         const data = await response.json()
         setCommits(data)
@@ -382,14 +377,6 @@ export function Session() {
 
   const command = useCommandDialog()
   
-  // Suspend global keybinds when commit timeline is open
-  createEffect(() => {
-    if (showCommitTimeline()) {
-      command.keybinds(false)
-      onCleanup(() => command.keybinds(true))
-    }
-  })
-  
   command.register(() => [
     ...(sync.data.config.share !== "disabled"
       ? [
@@ -541,25 +528,9 @@ export function Session() {
       },
     },
     {
-      title: sidebarVisible() ? "Hide sidebar" : "Show sidebar",
+      title: showCommitTimeline() ? "Hide sidebar" : "Show sidebar",
       value: "session.sidebar.toggle",
       keybind: "sidebar_toggle",
-      category: "Session",
-      onSelect: (dialog) => {
-        setSidebar((prev) => {
-          if (prev === "auto") return sidebarVisible() ? "hide" : "show"
-          if (prev === "show") return "hide"
-          return "show"
-        })
-        if (sidebar() === "show") kv.set("sidebar", "auto")
-        if (sidebar() === "hide") kv.set("sidebar", "hide")
-        dialog.clear()
-      },
-    },
-    {
-      title: showCommitTimeline() ? "Hide commit timeline" : "Show commit timeline",
-      value: "session.commits.toggle",
-      keybind: "commits_toggle",
       category: "Session",
       onSelect: (dialog) => {
         setShowCommitTimeline((prev) => !prev)
@@ -992,7 +963,7 @@ export function Session() {
       <box flexDirection="row">
         <box flexGrow={1} paddingBottom={1} paddingTop={1} paddingLeft={2} paddingRight={2} gap={1}>
           <Show when={session()}>
-            <Show when={!sidebarVisible()}>
+            <Show when={!timelineVisible()}>
               <Header />
             </Show>
             <scrollbox
@@ -1112,29 +1083,26 @@ export function Session() {
                   prompt = r
                   promptRef.set(r)
                 }}
-                disabled={permissions().length > 0 || showCommitTimeline()}
+                disabled={permissions().length > 0}
                 onSubmit={() => {
                   toBottom()
                 }}
                 sessionID={route.sessionID}
               />
             </box>
-            <Show when={!sidebarVisible()}>
+            <Show when={!timelineVisible()}>
               <Footer />
             </Show>
           </Show>
           <Toast />
         </box>
-        <Show when={sidebarVisible() && !showCommitTimeline()}>
-          <Sidebar sessionID={route.sessionID} />
-        </Show>
-        <Show when={showCommitTimeline()}>
+        <Show when={timelineVisible()}>
           <CommitTimeline
             sessionID={route.sessionID}
             commits={commits()}
             onSelectCommit={revertToCommit}
             onClose={() => setShowCommitTimeline(false)}
-            active={showCommitTimeline()}
+            active={timelineVisible()}
             activeHash={activeCommitHash()}
           />
         </Show>

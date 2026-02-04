@@ -3,15 +3,11 @@ import { createMemo, createEffect, createSignal, For, Show, Switch, Match } from
 import { createStore } from "solid-js/store"
 import { useTheme } from "../../context/theme"
 import { useToast } from "../../ui/toast"
-import { useLocal } from "../../context/local"
 import { Locale } from "@/util/locale"
 import path from "path"
 import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { Installation } from "@/installation"
-import { useKeybind } from "../../context/keybind"
 import { useDirectory } from "../../context/directory"
-import { useDialog } from "../../ui/dialog"
-import { DialogRateLimit } from "../../component/dialog-rate-limit"
 
 // Threshold for low cache hit rate warning
 const LOW_CACHE_HIT_THRESHOLD = 40
@@ -22,59 +18,6 @@ function percentToBar(percent: number): string {
   const blocks = [" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
   const index = Math.round((percent / 100) * 8)
   return blocks[Math.min(8, Math.max(0, index))]
-}
-
-// Row with label and horizontal bar for rate limits
-function RateLimitRow(props: {
-  remaining: number
-  limit: number
-  window: string
-}) {
-  const { theme } = useTheme()
-  
-  // Clamp remaining to be >= 0 and <= limit to handle edge cases
-  // (e.g., first message hitting rate limits where remaining could be 0 or negative)
-  const safeRemaining = createMemo(() => 
-    Math.max(0, Math.min(props.remaining ?? 0, props.limit ?? 0))
-  )
-  
-  // If limit is 0 or missing, show 0% (empty bar) not 100% (full bar)
-  const percentRemaining = createMemo(() => 
-    props.limit > 0 ? (safeRemaining() / props.limit) * 100 : 0
-  )
-  
-  // Bar width fits in column
-  const barWidth = 10
-  const filledBlocks = createMemo(() => Math.round((percentRemaining() / 100) * barWidth))
-  const progressBar = createMemo(() => {
-    const filled = Math.max(0, Math.min(barWidth, filledBlocks()))
-    const empty = barWidth - filled
-    return "█".repeat(filled) + "░".repeat(empty)
-  })
-  
-  const barColor = createMemo(() => {
-    const percent = percentRemaining()
-    if (percent >= 50) return theme.success
-    if (percent >= 20) return theme.warning
-    return theme.error
-  })
-  
-  // Window label
-  const windowLabel = () => {
-    if (props.window === "minute") return "min"
-    if (props.window === "hour") return "hour"
-    if (props.window === "day") return "day"
-    return props.window
-  }
-  
-  return (
-    <box flexDirection="row" gap={1}>
-      <text fg={theme.textMuted} width={4}>{windowLabel()}</text>
-      <text>
-        <span style={{ fg: barColor() }}>{progressBar()}</span>
-      </text>
-    </box>
-  )
 }
 
 function ContextProgressBar(props: {
@@ -228,8 +171,6 @@ export function Sidebar(props: { sessionID: string }) {
   const sync = useSync()
   const { theme } = useTheme()
   const toast = useToast()
-  const local = useLocal()
-  const dialog = useDialog()
   const session = createMemo(() => sync.session.get(props.sessionID)!)
   const diff = createMemo(() => sync.data.session_diff[props.sessionID] ?? [])
   const todo = createMemo(() => sync.data.todo[props.sessionID] ?? [])
@@ -282,46 +223,6 @@ export function Sidebar(props: { sessionID: string }) {
     }
   })
 
-  // Get rate limit info from sync store (populated via SSE events)
-  const rateLimitInfo = createMemo(() => {
-    const currentModel = local.model.current()
-    if (!currentModel?.providerID) return undefined
-    return sync.data.ratelimit[currentModel.providerID]
-  })
-
-  // Determine API key tier based on rate limits
-  // Free: 10 RPM, 60K TPM, 1M TPD
-  // Pro: 50 RPM, 1M TPM, 24M TPD
-  // Max: 120 RPM, 1.5M TPM, 120M TPD
-  // PayGo: Higher than Max
-  const apiTier = createMemo(() => {
-    const info = rateLimitInfo()
-    if (!info) return null
-    
-    // Find minute limits
-    const requestsPerMin = info.requestLimits?.find(w => w.window === "minute")?.limit
-    const tokensPerMin = info.tokenLimits?.find(w => w.window === "minute")?.limit
-    const tokensPerDay = info.tokenLimits?.find(w => w.window === "day")?.limit
-    
-    if (requestsPerMin === undefined) return null
-    
-    if (requestsPerMin <= 10) {
-      return { name: "Free Tier", color: theme.textMuted }
-    } else if (requestsPerMin <= 50) {
-      return { name: "Pro Plan", color: theme.success }
-    } else if (requestsPerMin <= 120) {
-      return { name: "Max Plan", color: theme.warning }
-    } else {
-      return { name: "PayGo", color: theme.accent }
-    }
-  })
-
-  const hasSuccessfulRequest = createMemo(() => {
-    const completedAssistants = messages().filter(
-      (m) => m.role === "assistant" && m.time.completed
-    )
-    return completedAssistants.length > 0
-  })
 
   const cacheStats = createMemo(() => {
     const assistants = messages().filter((m) => m.role === "assistant") as AssistantMessage[]
@@ -390,7 +291,6 @@ export function Sidebar(props: { sessionID: string }) {
     }
   })
 
-  const keybind = useKeybind()
   const directory = useDirectory()
 
   const hasProviders = createMemo(() =>
@@ -409,25 +309,6 @@ export function Sidebar(props: { sessionID: string }) {
       >
         <scrollbox flexGrow={1}>
           <box flexShrink={0} gap={1} paddingRight={1}>
-            {/* Rate limit help banner - shown when rate limits are available and a request has been made */}
-            <Show when={rateLimitInfo() && hasSuccessfulRequest()}>
-              <box
-                backgroundColor={theme.backgroundElement}
-                paddingTop={1}
-                paddingBottom={1}
-                paddingLeft={2}
-                paddingRight={2}
-                onMouseUp={() => DialogRateLimit.show(dialog)}
-              >
-                <box flexDirection="row" gap={1} alignItems="center">
-                  <text fg={theme.warning}>⚡</text>
-                  <text fg={theme.text}>
-                    <b>Why am I getting rate limited?</b>
-                  </text>
-                </box>
-                <text fg={theme.textMuted}>Click to learn more</text>
-              </box>
-            </Show>
             <box>
               <text fg={theme.text}>
                 <b>{session().title}</b>
@@ -463,48 +344,6 @@ export function Sidebar(props: { sessionID: string }) {
                   promptTokens={cacheStats().promptTokens}
                   recentRates={perMessageCacheRates()}
                 />
-              </box>
-            </Show>
-            <Show when={rateLimitInfo() && hasSuccessfulRequest()}>
-              <box>
-                <box flexDirection="row" gap={1}>
-                  <text fg={theme.text}>
-                    <b>Rate Limits</b>
-                  </text>
-                  <Show when={apiTier()}>
-                    <text style={{ fg: apiTier()!.color }}>
-                      [{apiTier()!.name}]
-                    </text>
-                  </Show>
-                </box>
-                <box flexDirection="row" gap={2}>
-                  {/* Tokens column */}
-                  <box flexGrow={1} gap={1}>
-                    <text fg={theme.textMuted}>Tokens</text>
-                    <For each={rateLimitInfo()?.tokenLimits || []}>
-                      {(windowInfo) => (
-                        <RateLimitRow
-                          remaining={windowInfo.remaining}
-                          limit={windowInfo.limit}
-                          window={windowInfo.window}
-                        />
-                      )}
-                    </For>
-                  </box>
-                  {/* Requests column */}
-                  <box flexGrow={1} gap={1}>
-                    <text fg={theme.textMuted}>Requests</text>
-                    <For each={rateLimitInfo()?.requestLimits || []}>
-                      {(windowInfo) => (
-                        <RateLimitRow
-                          remaining={windowInfo.remaining}
-                          limit={windowInfo.limit}
-                          window={windowInfo.window}
-                        />
-                      )}
-                    </For>
-                  </box>
-                </box>
               </box>
             </Show>
             <Show when={mcpEntries().length > 0}>

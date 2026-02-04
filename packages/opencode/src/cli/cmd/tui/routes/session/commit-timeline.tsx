@@ -28,14 +28,13 @@ export function CommitTimeline(props: CommitTimelineProps) {
     } else if (evt.name === "up") {
       evt.preventDefault()
       setSelectedIndex((i) => Math.max(i - 1, 0))
-    } else if (evt.name === "tab") {
+    } else if (evt.shift && evt.name === "tab") {
       evt.preventDefault()
       const commit = props.commits[selectedIndex()]
       if (commit) {
         props.onSelectCommit(commit)
-        // Don't close - stay open for easy navigation
       }
-    } else if (evt.name === "escape" || evt.name === "q") {
+    } else if (evt.name === "escape") {
       evt.preventDefault()
       props.onClose?.()
     }
@@ -95,6 +94,10 @@ export function CommitTimeline(props: CommitTimelineProps) {
                   flexDirection="column"
                   backgroundColor={isSelected() ? theme.backgroundElement : undefined}
                   marginTop={index() === 0 ? 0 : 1}
+                  onMouseUp={() => {
+                    setSelectedIndex(index())
+                    props.onSelectCommit(commit)
+                  }}
                 >
                   <box flexDirection="row" gap={1}>
                     <text fg={isActive() ? theme.success : isSelected() ? theme.accent : theme.textMuted}>
@@ -145,7 +148,7 @@ export function CommitTimeline(props: CommitTimelineProps) {
       </Show>
       
       <box paddingLeft={1} paddingRight={1} flexShrink={0}>
-        <text fg={theme.textMuted}>↑↓ nav • tab restore • q close</text>
+        <text fg={theme.textMuted}>↑↓ nav • ⇧⇥ restore • esc close</text>
       </box>
     </box>
   )
