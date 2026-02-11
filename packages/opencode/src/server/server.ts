@@ -129,8 +129,16 @@ export namespace Server {
               })
             }
             GlobalBus.on("event", handler)
+            const heartbeat = setInterval(async () => {
+              try {
+                await stream.writeSSE({ event: "ping", data: "" })
+              } catch {
+                clearInterval(heartbeat)
+              }
+            }, 30_000)
             await new Promise<void>((resolve) => {
               stream.onAbort(() => {
+                clearInterval(heartbeat)
                 GlobalBus.off("event", handler)
                 resolve()
                 log.info("global event disconnected")
@@ -2416,8 +2424,16 @@ export namespace Server {
                 stream.close()
               }
             })
+            const heartbeat = setInterval(async () => {
+              try {
+                await stream.writeSSE({ event: "ping", data: "" })
+              } catch {
+                clearInterval(heartbeat)
+              }
+            }, 30_000)
             await new Promise<void>((resolve) => {
               stream.onAbort(() => {
+                clearInterval(heartbeat)
                 unsub()
                 resolve()
                 log.info("event disconnected")

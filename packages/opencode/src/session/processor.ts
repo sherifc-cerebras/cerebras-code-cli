@@ -18,6 +18,11 @@ export namespace SessionProcessor {
   const DOOM_LOOP_THRESHOLD = 3
   const log = Log.create({ service: "session.processor" })
 
+  // Time to first token - generous for high-latency providers
+  const TTFT_TIMEOUT_MS = 60_000
+  // Inactivity after first chunk received - provider went silent mid-stream
+  const STREAM_INACTIVITY_TIMEOUT_MS = 120_000
+
   export type Info = Awaited<ReturnType<typeof create>>
   export type Result = Awaited<ReturnType<Info["process"]>>
 
@@ -51,13 +56,43 @@ export namespace SessionProcessor {
       },
       async process(streamInput: StreamInput) {
         log.info("process")
+        let inactivityTimer: Timer | undefined
+        const clearInactivity = () => {
+          if (inactivityTimer) clearTimeout(inactivityTimer)
+        }
+
         while (true) {
           try {
             let currentText: MessageV2.TextPart | undefined
             let reasoningMap: Record<string, MessageV2.ReasoningPart> = {}
+
+            // Inactivity watchdog: abort if provider goes silent
+            const timeoutAbort = new AbortController()
+            let receivedFirstChunk = false
+            const resetInactivity = () => {
+              clearInactivity()
+              const timeout = receivedFirstChunk ? STREAM_INACTIVITY_TIMEOUT_MS : TTFT_TIMEOUT_MS
+              inactivityTimer = setTimeout(() => {
+                log.warn("stream inactivity timeout", {
+                  receivedFirstChunk,
+                  timeout,
+                  sessionID: input.sessionID,
+                })
+                timeoutAbort.abort(new Error(`Stream timeout: no data for ${timeout / 1000}s`))
+              }, timeout)
+            }
+            // Forward user cancellation to the timeout controller
+            if (input.abort.aborted) timeoutAbort.abort()
+            else input.abort.addEventListener("abort", () => timeoutAbort.abort(), { once: true })
+            resetInactivity()
+
+            // Override the abort signal to include inactivity timeout
+            ;(streamInput as any).abortSignal = timeoutAbort.signal
             const stream = streamText(streamInput)
 
             for await (const value of stream.fullStream) {
+              receivedFirstChunk = true
+              resetInactivity()
               input.abort.throwIfAborted()
               switch (value.type) {
                 case "start":
@@ -389,7 +424,9 @@ export namespace SessionProcessor {
                   continue
               }
             }
+            clearInactivity()
           } catch (e: any) {
+            clearInactivity()
             log.error("process", {
               error: e,
               stack: JSON.stringify(e.stack),
