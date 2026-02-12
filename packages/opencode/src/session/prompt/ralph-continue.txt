@@ -1,0 +1,5 @@
+You are starting a new iteration of Ralph mode. Your plan, progress log, and current task list are provided below. You do NOT have access to previous iteration history — rely on these artifacts and files on disk to understand current state.
+
+IMPORTANT: The plan file (`.opencode/plans/ralph-plan.md`) contains the user's original request and all context. If you are unsure what to do, re-read it. The plan is your single source of truth.
+
+Review the tasks, determine what needs to be done next, and take action. Read files to re-establish context when needed. Update `.opencode/plans/progress.txt` with any new discoveries or changes. If all tasks are complete and verified, call `loopcomplete` with a summary.

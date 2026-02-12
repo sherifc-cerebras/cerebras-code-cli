@@ -26,10 +26,12 @@ import { SystemPrompt } from "./system"
 import { Plugin } from "../plugin"
 
 import PROMPT_PLAN from "../session/prompt/plan.txt"
+import PROMPT_RALPH from "../session/prompt/ralph.txt"
+import RALPH_CONTINUE from "../session/prompt/ralph-continue.txt"
 import BUILD_SWITCH from "../session/prompt/build-switch.txt"
 import MAX_STEPS from "../session/prompt/max-steps.txt"
 import { defer } from "../util/defer"
-import { mergeDeep, pipe } from "remeda"
+import { clone, mergeDeep, pipe } from "remeda"
 import { ToolRegistry } from "../tool/registry"
 import { Wildcard } from "../util/wildcard"
 import { MCP } from "../mcp"
@@ -49,6 +51,8 @@ import { fn } from "@/util/fn"
 import { SessionProcessor } from "./processor"
 import { TaskTool } from "@/tool/task"
 import { SessionStatus } from "./status"
+import { Token } from "../util/token"
+import { Todo } from "./todo"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -245,6 +249,9 @@ export namespace SessionPrompt {
     using _ = defer(() => cancel(sessionID))
 
     let step = 0
+    let ralphDone = false
+    const maxRalphIterations = 25
+    const maxRalphSteps = 200
     while (true) {
       SessionStatus.set(sessionID, { type: "busy" })
       log.info("loop", { step, sessionID })
@@ -269,7 +276,21 @@ export namespace SessionPrompt {
       }
 
       if (!lastUser) throw new Error("No user message found in stream. This should never happen.")
-      
+
+      // Hard safety cap on total LLM calls for ralph mode
+      if (lastUser.agent === "ralph" && step >= maxRalphSteps) {
+        log.info("ralph hard step limit reached", { step, max: maxRalphSteps })
+        break
+      }
+
+      // Detect ralph loop completion from assistant parts
+      if (lastUser.agent === "ralph" && lastAssistant && !ralphDone) {
+        const assistantMsg = msgs.find((m) => m.info.id === lastAssistant!.id)
+        if (assistantMsg?.parts.some((p) => p.type === "tool" && p.tool === "loopcomplete")) {
+          ralphDone = true
+        }
+      }
+
       // Check for switch_mode tool in the LATEST assistant message only
       // Only trigger if auto_switch_models is enabled and we haven't already switched
       // Read config fresh (invalidate cache first to get latest settings)
@@ -332,6 +353,67 @@ export namespace SessionPrompt {
         !["tool-calls", "unknown"].includes(lastAssistant.finish) &&
         lastUser.id < lastAssistant.id
       ) {
+        // Ralph loop continuation
+        if (lastUser.agent === "ralph" && !ralphDone) {
+          // If the model produced pure text with no tool calls, it's consulting the
+          // user (asking questions, presenting a plan). Pause and wait for input.
+          const assistantMsg = msgs.find((m) => m.info.id === lastAssistant!.id)
+          const usedTools = assistantMsg?.parts.some((p) => p.type === "tool")
+          if (!usedTools) {
+            log.info("ralph pausing for user input", { sessionID })
+            break
+          }
+
+          // Count ralph continues since the last real (non-synthetic) user message.
+          // Naturally resets when the user sends a new message after a loop ends.
+          let lastRealIdx = -1
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            if (
+              msgs[i].info.role === "user" &&
+              !msgs[i].parts.every((p) => "synthetic" in p && p.synthetic)
+            ) {
+              lastRealIdx = i
+              break
+            }
+          }
+          const ralphIteration = msgs
+            .slice(lastRealIdx + 1)
+            .filter(
+              (m) =>
+                m.info.role === "user" &&
+                m.parts.some(
+                  (p) =>
+                    p.type === "text" &&
+                    "metadata" in p &&
+                    (p as MessageV2.TextPart).metadata?.source === "ralph-continue",
+                ),
+            ).length
+          if (ralphIteration < maxRalphIterations) {
+            log.info("ralph loop continuing", {
+              iteration: ralphIteration + 1,
+              max: maxRalphIterations,
+            })
+            const continueMsg: MessageV2.User = {
+              id: Identifier.ascending("message"),
+              sessionID,
+              role: "user",
+              time: { created: Date.now() },
+              agent: lastUser.agent,
+              model: lastUser.model,
+            }
+            await Session.updateMessage(continueMsg)
+            await Session.updatePart({
+              type: "text",
+              id: Identifier.ascending("part"),
+              messageID: continueMsg.id,
+              sessionID,
+              text: RALPH_CONTINUE,
+              synthetic: true,
+              metadata: { source: "ralph-continue" },
+            })
+            continue
+          }
+        }
         log.info("exiting loop", { sessionID })
         break
       }
@@ -501,6 +583,110 @@ export namespace SessionPrompt {
         messages: msgs,
         agent,
       })
+
+      // Ralph: strip message history ONLY during autonomous loop iterations (synthetic
+      // ralph-continue messages). During planning/user interaction, keep full history so the
+      // model remembers the original request and the conversation.
+      if (lastUser.agent === "ralph") {
+        const isSyntheticContinue = msgs
+          .findLast((m) => m.info.role === "user")
+          ?.parts.some(
+            (p) =>
+              p.type === "text" &&
+              "metadata" in p &&
+              (p as MessageV2.TextPart).metadata?.source === "ralph-continue",
+          )
+        if (isSyntheticContinue) {
+          const turnStart = msgs.findLastIndex((m) => m.info.role === "user")
+          if (turnStart > 0) {
+            msgs = msgs.slice(turnStart)
+          }
+        }
+
+        // Inject CWD, plan, progress log, and task list so the model has context
+        const lastUserMsg = msgs.find((m) => m.info.role === "user")
+        if (lastUserMsg) {
+          const planPath = path.join(Instance.worktree, ".opencode/plans/ralph-plan.md")
+          const progressPath = path.join(Instance.worktree, ".opencode/plans/progress.txt")
+          const planContent = await Bun.file(planPath)
+            .text()
+            .catch(() => "")
+          const progressContent = await Bun.file(progressPath)
+            .text()
+            .catch(() => "")
+          const todos = await Todo.get(sessionID)
+          const todoList = todos.length > 0
+            ? todos.map((t) => `- [${t.status}] ${t.content}`).join("\n")
+            : ""
+
+          const contextParts = [
+            `## CWD\n${Instance.directory}`,
+            planContent ? `## Plan\n${planContent}` : "",
+            progressContent ? `## Progress\n${progressContent}` : "",
+            todoList ? `## Tasks\n${todoList}` : "",
+          ].filter(Boolean)
+
+          if (contextParts.length > 0) {
+            lastUserMsg.parts.push({
+              id: Identifier.ascending("part"),
+              messageID: lastUserMsg.info.id,
+              sessionID,
+              type: "text",
+              text: contextParts.join("\n\n"),
+              synthetic: true,
+            })
+          }
+        }
+
+        // Enforce token budget: estimate total context and truncate old tool outputs
+        const budget = model.limit.context - ProviderTransform.maxOutputTokens(
+          model.api.npm,
+          agent.options,
+          model.limit.output,
+          OUTPUT_TOKEN_MAX,
+        )
+        if (budget > 0) {
+          let total = 0
+          for (const msg of msgs) {
+            for (const part of msg.parts) {
+              if (part.type === "text") total += Token.estimate(part.text)
+              if (part.type === "tool" && part.state.status === "completed") {
+                total += Token.estimate(
+                  typeof part.state.output === "string"
+                    ? part.state.output
+                    : JSON.stringify(part.state.output),
+                )
+              }
+            }
+          }
+          // If over 80% of budget, truncate tool outputs from oldest to newest
+          if (total > budget * 0.8) {
+            log.info("ralph token budget exceeded, truncating tool outputs", {
+              estimated: total,
+              budget,
+            })
+            for (const msg of msgs) {
+              if (total <= budget * 0.6) break
+              for (const part of msg.parts) {
+                if (total <= budget * 0.6) break
+                if (part.type === "tool" && part.state.status === "completed") {
+                  const output =
+                    typeof part.state.output === "string"
+                      ? part.state.output
+                      : JSON.stringify(part.state.output)
+                  const tokens = Token.estimate(output)
+                  if (tokens > 500) {
+                    const truncated = `[Output truncated - was ${tokens} tokens. Tool: ${part.tool}]`
+                    part.state.output = truncated
+                    total -= tokens - Token.estimate(truncated)
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+
       // Count conversation turns (user messages) for telemetry
       const conversationTurns = msgs.filter((m) => m.info.role === "user").length
       const processor = SessionProcessor.create({
@@ -1227,6 +1413,16 @@ export namespace SessionPrompt {
   function insertReminders(input: { messages: MessageV2.WithParts[]; agent: Agent.Info }) {
     const userMessage = input.messages.findLast((msg) => msg.info.role === "user")
     if (!userMessage) return input.messages
+    if (input.agent.name === "ralph") {
+      userMessage.parts.push({
+        id: Identifier.ascending("part"),
+        messageID: userMessage.info.id,
+        sessionID: userMessage.info.sessionID,
+        type: "text",
+        text: PROMPT_RALPH,
+        synthetic: true,
+      })
+    }
     if (input.agent.name === "plan") {
       userMessage.parts.push({
         id: Identifier.ascending("part"),

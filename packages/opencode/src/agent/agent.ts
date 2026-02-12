@@ -168,6 +168,19 @@ export namespace Agent {
         mode: "primary",
         builtIn: true,
       },
+      ralph: {
+        name: "ralph",
+        description: "Autonomous coding agent that iterates on a task until complete. Uses a plan-execute-verify loop with up to 25 iterations.",
+        tools: {
+          loopcomplete: true,
+          ...defaultTools,
+        },
+        options: {},
+        permission: agentPermission,
+        mode: "primary",
+        builtIn: true,
+        color: "#FF6B35",
+      },
     }
     for (const [key, value] of Object.entries(cfg.agent ?? {})) {
       if (value.disable) {

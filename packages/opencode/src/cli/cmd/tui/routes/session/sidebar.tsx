@@ -244,6 +244,79 @@ export function Sidebar(props: { sessionID: string }) {
     diff: true,
     todo: true,
     lsp: true,
+    plan: true,
+  })
+
+  // Detect ralph mode and compute iteration/plan info
+  const ralph = createMemo(() => {
+    const msgs = messages()
+    const lastMsg = msgs.findLast((m) => m.role === "assistant")
+    if (!lastMsg || (lastMsg as AssistantMessage).mode !== "ralph") return undefined
+
+    let planSummary: string | undefined
+    let iteration = 0
+
+    // Find last real (non-synthetic) user message — iteration count resets from here
+    let lastRealIdx = -1
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      if (msgs[i].role === "user") {
+        const parts = sync.data.part[msgs[i].id] ?? []
+        if (!parts.every((p: any) => p.type === "text" && p.synthetic)) {
+          lastRealIdx = i
+          break
+        }
+      }
+    }
+
+    for (let i = 0; i < msgs.length; i++) {
+      const msg = msgs[i]
+
+      // Plan summary: scan all assistant messages (show latest plan)
+      if (msg.role === "assistant" && (msg as AssistantMessage).mode === "ralph") {
+        const parts = sync.data.part[msg.id] ?? []
+        for (const part of parts) {
+          const p = part as any
+          if (
+            p.type === "tool" &&
+            p.tool === "write" &&
+            p.state?.status === "completed" &&
+            p.state?.input?.filePath?.includes("ralph-plan")
+          ) {
+            const content = p.state.input?.content as string | undefined
+            if (content) {
+              const bullets: string[] = []
+              for (const raw of content.split("\n")) {
+                const line = raw.trim()
+                if (!line) continue
+                if (line.startsWith("# ")) continue
+                if (line.startsWith("## ") || line.startsWith("### ")) {
+                  bullets.push(`[${line.replace(/^#{2,3}\s*/, "")}]`)
+                  continue
+                }
+                if (line.length <= 120) {
+                  bullets.push(`  ${line}`)
+                }
+              }
+              planSummary = bullets.slice(0, 30).join("\n")
+            }
+          }
+        }
+      }
+
+      // Count ralph-continue synthetic messages in the current loop only
+      if (i > lastRealIdx && msg.role === "user") {
+        const parts = sync.data.part[msg.id] ?? []
+        if (parts.some((p: any) => p.type === "text" && p.metadata?.source === "ralph-continue")) {
+          iteration++
+        }
+      }
+    }
+
+    return {
+      iteration,
+      maxIterations: 25,
+      plan: planSummary,
+    }
   })
 
   // Sort MCP servers alphabetically for consistent display order
@@ -436,6 +509,42 @@ export function Sidebar(props: { sessionID: string }) {
                 <text fg={theme.textMuted}>{session().share!.url}</text>
               </Show>
             </box>
+            <Show when={ralph()}>
+              <box>
+                <text fg={theme.text}>
+                  <b>Ralph</b>{" "}
+                  <span style={{ fg: theme.success }}>
+                    {`Iteration ${ralph()!.iteration}/${ralph()!.maxIterations}`}
+                  </span>
+                </text>
+              </box>
+            </Show>
+            <Show when={ralph()?.plan}>
+              <box>
+                <box
+                  flexDirection="row"
+                  gap={1}
+                  onMouseDown={() => setExpanded("plan", !expanded.plan)}
+                >
+                  <text fg={theme.text}>{expanded.plan ? "▼" : "▶"}</text>
+                  <text fg={theme.text}>
+                    <b>Plan</b>
+                  </text>
+                </box>
+                <Show when={expanded.plan}>
+                  <For each={ralph()!.plan!.split("\n")}>
+                    {(line) => (
+                      <text
+                        fg={line.startsWith("[") ? theme.text : theme.textMuted}
+                        wrapMode="word"
+                      >
+                        {line.startsWith("[") ? <b>{line.slice(1, -1)}</b> : `• ${line.trim()}`}
+                      </text>
+                    )}
+                  </For>
+                </Show>
+              </box>
+            </Show>
             <box>
               <text fg={theme.text}>
                 <b>Context</b>
